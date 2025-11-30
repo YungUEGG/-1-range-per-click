@@ -1,12 +1,17 @@
 --[[
-    [서버 매니저 v6 - 만렙 경험치 제한 완전 해제]
+    [서버 매니저 v7 - 데이터 저장 및 불러오기 추가 (DataStore)]
     수정 사항:
-    1. '만렙이면 경험치 획득 중단' 코드를 삭제하여 경험치가 계속 쌓이도록 수정
-    2. 레벨업 반복문(while) 안에서만 레벨 제한을 걸어, 레벨은 멈추고 경험치만 쌓이게 함
+    1. DataStoreService를 사용하여 플레이어 데이터 저장 및 불러오기 기능 추가 (게임의 핵심)
+    2. PlayerRemoving 이벤트에 저장 로직 연결
+    3. PlayerAdded 이벤트에 불러오기 로직 연결
 ]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local DataStoreService = game:GetService("DataStoreService")
+
+-- [신규] DataStore 설정
+local PlayerDataStore = DataStoreService:GetDataStore("LongerSwordData_v1")
 
 -- 리모트 이벤트 자동 생성
 local remoteFolder = ReplicatedStorage:FindFirstChild("Remotes")
@@ -35,7 +40,28 @@ local BASE_EXP_REQ = 100
 local EXP_EXPONENT = 1.14 
 local BASE_MAX_LEVEL = 25 
 
+-- [신규] 기본 스탯 템플릿
+local defaultStats = {
+	Level = 1,
+	Rebirth = 0,
+	Coins = 0,
+	CurrentExp = 0,
+	RobuxMultiplier = 1,
+}
+
 Players.PlayerAdded:Connect(function(player)
+	-- 데이터 불러오기
+	local loadedData
+	local success, err = pcall(function()
+		loadedData = PlayerDataStore:GetAsync(player.UserId)
+	end)
+
+	-- DataStore 불러오기 실패 또는 데이터가 없을 경우 기본값 사용
+	if not success or not loadedData then
+		warn("데이터 로드 실패 또는 신규 플레이어: ", err)
+		loadedData = defaultStats
+	end
+
 	-- 리더보드
 	local leaderstats = Instance.new("Folder")
 	leaderstats.Name = "leaderstats"
@@ -43,17 +69,17 @@ Players.PlayerAdded:Connect(function(player)
 
 	local level = Instance.new("IntValue")
 	level.Name = "Level"
-	level.Value = 1
+	level.Value = loadedData.Level
 	level.Parent = leaderstats
 
 	local rebirth = Instance.new("IntValue")
 	rebirth.Name = "Rebirth"
-	rebirth.Value = 0
+	rebirth.Value = loadedData.Rebirth
 	rebirth.Parent = leaderstats
 
 	local coins = Instance.new("IntValue")
 	coins.Name = "Coins"
-	coins.Value = 0
+	coins.Value = loadedData.Coins
 	coins.Parent = leaderstats
 
 	-- 숨겨진 스탯
@@ -63,24 +89,25 @@ Players.PlayerAdded:Connect(function(player)
 
 	local currentExp = Instance.new("IntValue")
 	currentExp.Name = "CurrentExp"
-	currentExp.Value = 0
+	currentExp.Value = loadedData.CurrentExp
 	currentExp.Parent = hidden
 
+	-- MaxExp는 레벨 기반으로 다시 계산
 	local maxExp = Instance.new("IntValue")
 	maxExp.Name = "MaxExp"
-	maxExp.Value = BASE_EXP_REQ
+	maxExp.Value = math.floor(BASE_EXP_REQ * (EXP_EXPONENT ^ (loadedData.Level - 1)))
 	maxExp.Parent = hidden
-	
+
 	local robuxMult = Instance.new("IntValue")
 	robuxMult.Name = "RobuxMultiplier"
-	robuxMult.Value = 1 
+	robuxMult.Value = loadedData.RobuxMultiplier
 	robuxMult.Parent = hidden
 end)
 
 local function calculateMultiplier(player)
 	local rebirth = player.leaderstats.Rebirth.Value
 	local robuxMult = player.HiddenStats.RobuxMultiplier.Value
-	
+
 	local rebirthMult = 1 + (rebirth * 0.5)
 	return robuxMult * rebirthMult
 end
@@ -90,20 +117,13 @@ remoteFolder.GainExp.OnServerEvent:Connect(function(player)
 	local stats = player:FindFirstChild("leaderstats")
 	local hidden = player:FindFirstChild("HiddenStats")
 	if not stats then return end
-	
-	-- 현재 환생 횟수에 따른 만렙 제한
-	local levelCap = BASE_MAX_LEVEL + (stats.Rebirth.Value * 25)
-	
-	-- [핵심 수정] 예전에는 여기서 만렙이면 return으로 끝내버렸지만, 이제는 통과시킵니다!
-	-- if stats.Level.Value >= levelCap then return end (삭제됨)
 
+	local levelCap = BASE_MAX_LEVEL + (stats.Rebirth.Value * 25)
 	local amount = BASE_EXP * calculateMultiplier(player)
 	hidden.CurrentExp.Value = hidden.CurrentExp.Value + amount
-	
+
 	-- 경험치가 요구량보다 많으면 레벨업 시도
 	while hidden.CurrentExp.Value >= hidden.MaxExp.Value do
-		-- [핵심] 여기서 만렙인지 체크! 만렙이면 레벨업을 멈추고 반복문 탈출
-		-- 결과적으로 경험치(CurrentExp)는 깎이지 않고 계속 쌓여있게 됨
 		if stats.Level.Value >= levelCap then
 			break 
 		end
@@ -112,7 +132,7 @@ remoteFolder.GainExp.OnServerEvent:Connect(function(player)
 		stats.Level.Value = stats.Level.Value + 1
 		hidden.MaxExp.Value = math.floor(BASE_EXP_REQ * (EXP_EXPONENT ^ (stats.Level.Value - 1)))
 	end
-	
+
 	remoteFolder.UpdateStats:FireClient(player)
 end)
 
@@ -127,21 +147,44 @@ remoteFolder.Rebirth.OnServerEvent:Connect(function(player)
 	local stats = player:FindFirstChild("leaderstats")
 	local hidden = player:FindFirstChild("HiddenStats")
 	if not stats then return end
-	
+
 	local level = stats.Level
 	local rebirth = stats.Rebirth
-	
+
 	local requiredLevel = BASE_MAX_LEVEL + (rebirth.Value * 25)
-	
+
 	if level.Value >= requiredLevel then
 		rebirth.Value = rebirth.Value + 1
-		
+
 		-- 초기화
 		level.Value = 1
 		hidden.CurrentExp.Value = 0 
 		hidden.MaxExp.Value = BASE_EXP_REQ 
-		
+
 		print(player.Name .. "님 환생 성공! 현재 환생: " .. rebirth.Value)
 		player:LoadCharacter()
+	end
+end)
+
+-- [신규] 플레이어가 나갈 때 데이터 저장
+Players.PlayerRemoving:Connect(function(player)
+	local stats = player:FindFirstChild("leaderstats")
+	local hidden = player:FindFirstChild("HiddenStats")
+	if not stats or not hidden then return end
+
+	local dataToSave = {
+		Level = stats.Level.Value,
+		Rebirth = stats.Rebirth.Value,
+		Coins = stats.Coins.Value,
+		CurrentExp = hidden.CurrentExp.Value,
+		RobuxMultiplier = hidden.RobuxMultiplier.Value,
+	}
+
+	local success, err = pcall(function()
+		PlayerDataStore:SetAsync(player.UserId, dataToSave)
+	end)
+
+	if not success then
+		warn("데이터 저장 실패: ", err)
 	end
 end)
