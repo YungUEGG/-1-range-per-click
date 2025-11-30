@@ -1,0 +1,389 @@
+--[[
+    [클라이언트 시스템 통합 v18 - UI 호버 효과 & 폰트 변경]
+    기능:
+    1. 마우스 올리면 버튼이 어두워지는 호버 효과(Hover Effect) 추가
+    2. 폰트를 'LuckiestGuy'로 변경하여 카툰 느낌 강조
+    3. 최대 레벨(Max Level) 개념을 진행도 바에 명확히 반영 (예: 24/25 -> 1/50)
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local StarterGui = game:GetService("StarterGui")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local Camera = Workspace.CurrentCamera
+
+local player = Players.LocalPlayer
+local remotes = ReplicatedStorage:WaitForChild("Remotes")
+
+-- 맵 로딩 대기
+task.wait(3)
+
+------------------------------------------------------------------
+-- 0. UI 시스템 (자동 비율 & 텍스트 & 호버 효과)
+------------------------------------------------------------------
+
+-- [신규] 버튼 호버 효과 함수 (검은 막을 씌워서 어둡게 만듦)
+local function addHoverEffect(btn, cornerRadius)
+    if not btn then return end
+    
+    -- 호버용 검은 프레임 생성
+    local hoverFrame = Instance.new("Frame")
+    hoverFrame.Name = "HoverShade"
+    hoverFrame.Size = UDim2.new(1, 0, 1, 0)
+    hoverFrame.BackgroundColor3 = Color3.new(0, 0, 0)
+    hoverFrame.BackgroundTransparency = 1 -- 평소엔 투명
+    hoverFrame.ZIndex = btn.ZIndex + 1 -- 버튼보다 위에 표시
+    hoverFrame.Parent = btn
+    
+    -- 둥근 모서리가 있다면 맞춰주기
+    if cornerRadius then
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = cornerRadius
+        corner.Parent = hoverFrame
+    end
+    
+    -- 마우스 들어오면 어둡게
+    btn.MouseEnter:Connect(function()
+        TweenService:Create(hoverFrame, TweenInfo.new(0.2), {BackgroundTransparency = 0.7}):Play()
+    end)
+    
+    -- 마우스 나가면 다시 투명하게
+    btn.MouseLeave:Connect(function()
+        TweenService:Create(hoverFrame, TweenInfo.new(0.2), {BackgroundTransparency = 1}):Play()
+    end)
+end
+
+local function connectGameUI()
+    local playerGui = player:WaitForChild("PlayerGui")
+    local hud = playerGui:WaitForChild("GameHUD", 10)
+    
+    if not hud then return end
+    
+    -- UI 요소 찾기
+    local rebirthFrame = hud:FindFirstChild("RebirthFrame", true)
+    local openBtn = hud:FindFirstChild("OpenRebirthBtn", true)
+    
+    -- 투명 버튼
+    local doRebirthBtn = rebirthFrame and rebirthFrame:FindFirstChild("DoRebirthBtn", true)
+    local closeBtn = rebirthFrame and rebirthFrame:FindFirstChild("CloseBtn", true)
+    
+    -- 텍스트 라벨들
+    local currentRangeLabel = rebirthFrame and rebirthFrame:FindFirstChild("CurrentRangeLabel", true)
+    local nextRangeLabel = rebirthFrame and rebirthFrame:FindFirstChild("NextRangeLabel", true)
+    local currentReqLabel = rebirthFrame and rebirthFrame:FindFirstChild("CurrentReqLabel", true)
+    local nextReqLabel = rebirthFrame and rebirthFrame:FindFirstChild("NextReqLabel", true)
+    local resetText = rebirthFrame and rebirthFrame:FindFirstChild("ResetText", true)
+    
+    -- 진행도 바
+    local progressBarBg = rebirthFrame and rebirthFrame:FindFirstChild("ProgressBarBg", true)
+    local progressBarFill = progressBarBg and progressBarBg:FindFirstChild("ProgressBarFill", true)
+    local progressText = progressBarBg and progressBarBg:FindFirstChild("ProgressText", true)
+    
+    -- [신규] 폰트 일괄 변경 (LuckiestGuy)
+    local targetFont = Enum.Font.LuckiestGuy
+    local labels = {currentRangeLabel, nextRangeLabel, currentReqLabel, nextReqLabel, resetText, progressText}
+    for _, lbl in ipairs(labels) do
+        if lbl then lbl.Font = targetFont end
+    end
+    
+    -- [신규] 호버 효과 적용
+    addHoverEffect(doRebirthBtn, UDim.new(0, 10)) -- 환생 버튼
+    addHoverEffect(closeBtn, UDim.new(0, 5))      -- 닫기 버튼
+    addHoverEffect(openBtn, UDim.new(0, 10))      -- 열기 버튼
+    
+    -- 자동 스케일링 (UIScale)
+    local uiScale = rebirthFrame and rebirthFrame:FindFirstChild("MainScale")
+    if not uiScale and rebirthFrame then
+        uiScale = Instance.new("UIScale")
+        uiScale.Name = "MainScale"
+        uiScale.Parent = rebirthFrame
+    end
+    
+    local function updateScale()
+        if uiScale then
+            local scale = Camera.ViewportSize.Y / 900 
+            scale = math.clamp(scale, 0.5, 1.5)
+            uiScale.Scale = scale
+        end
+    end
+    Camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale)
+    updateScale()
+    
+    -- 데이터 연결
+    local leaderstats = player:WaitForChild("leaderstats")
+    local level = leaderstats:WaitForChild("Level")
+    local rebirth = leaderstats:WaitForChild("Rebirth")
+    
+    -- 정보 업데이트 함수
+    local function updateRebirthInfo()
+        local r = rebirth.Value
+        
+        -- 배수 계산
+        local curMult = 1 + (r * 0.5)
+        local nextMult = 1 + ((r + 1) * 0.5)
+        
+        -- 레벨 제한(Max Level) 계산
+        -- 환생 0회: 최대 25
+        -- 환생 1회: 최대 50
+        local currentMaxLevel = 25 + (r * 25)
+        local nextMaxLevel = 25 + ((r + 1) * 25)
+        
+        -- 텍스트 갱신
+        if currentRangeLabel then currentRangeLabel.Text = curMult .. "x Range" end
+        if nextRangeLabel then nextRangeLabel.Text = nextMult .. "x Range" end
+        
+        if currentReqLabel then currentReqLabel.Text = "Level " .. currentMaxLevel end
+        if nextReqLabel then nextReqLabel.Text = "Level " .. nextMaxLevel end
+        
+        if resetText then resetText.Text = "Rebirth resets your range level!" end
+        
+        -- 진행도 바 업데이트
+        if progressBarFill and progressText then
+            local currentLv = level.Value
+            
+            -- 현재 레벨 / 현재 최대 레벨 (예: 6 / 25)
+            -- 환생하면 currentMaxLevel이 50으로 바뀌므로 1 / 50 처럼 표시됨
+            local ratio = math.clamp(currentLv / currentMaxLevel, 0, 1)
+            
+            progressBarFill:TweenSize(UDim2.new(ratio, 0, 1, 0), "Out", "Quad", 0.2, true)
+            progressText.Text = "Level " .. currentLv .. " / " .. currentMaxLevel
+        end
+    end
+    
+    -- 값 변할 때마다 UI 갱신
+    level.Changed:Connect(updateRebirthInfo)
+    rebirth.Changed:Connect(updateRebirthInfo)
+    
+    task.delay(0.5, updateRebirthInfo)
+    
+    -- 버튼 이벤트 연결
+    if openBtn then
+        openBtn.MouseButton1Click:Connect(function()
+            if rebirthFrame then rebirthFrame.Visible = not rebirthFrame.Visible end
+        end)
+    end
+    
+    if closeBtn then
+        closeBtn.MouseButton1Click:Connect(function()
+            if rebirthFrame then rebirthFrame.Visible = false end
+        end)
+    end
+    
+    if doRebirthBtn then
+        doRebirthBtn.MouseButton1Click:Connect(function()
+            local currentMaxLevel = 25 + (rebirth.Value * 25)
+            
+            -- 현재 레벨이 최대 레벨에 도달했는지 확인
+            if level.Value >= currentMaxLevel then
+                remotes.Rebirth:FireServer()
+                
+                -- 클릭 효과 (작아졌다 커짐)
+                doRebirthBtn:TweenSize(UDim2.new(doRebirthBtn.Size.X.Scale * 0.9, 0, doRebirthBtn.Size.Y.Scale * 0.9, 0), "Out", "Quad", 0.1, true)
+                task.wait(0.1)
+                doRebirthBtn:TweenSize(UDim2.new(doRebirthBtn.Size.X.Scale / 0.9, 0, doRebirthBtn.Size.Y.Scale / 0.9, 0), "Out", "Quad", 0.1, true)
+            else
+                print("아직 레벨이 부족합니다! (".. level.Value .. "/" .. currentMaxLevel .. ")")
+            end
+        end)
+    end
+end
+
+task.spawn(connectGameUI)
+
+------------------------------------------------------------------
+-- 1. 무기 시스템
+------------------------------------------------------------------
+pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false) end)
+
+local function equipWeapon()
+    local character = player.Character
+    if not character then return end
+    local humanoid = character:FindFirstChild("Humanoid")
+    if not humanoid then return end
+    
+    local currentTool = character:FindFirstChild("Sword")
+    if not currentTool then
+        local swordOrigin = ReplicatedStorage:FindFirstChild("Sword")
+        if swordOrigin then
+            local newSword = swordOrigin:Clone()
+            local handle = newSword:FindFirstChild("Handle")
+            
+            if handle then
+                handle.Anchored = false
+                handle.CanCollide = false 
+                handle.Massless = true
+                handle.CanTouch = true
+            end
+            
+            newSword.Parent = player.Backpack
+            humanoid:EquipTool(newSword)
+            newSword.Grip = CFrame.new(0, 0, 2) * CFrame.Angles(math.rad(0), math.rad(90), math.rad(-90))
+        end
+    end
+end
+
+player.CharacterAdded:Connect(function(char)
+    local humanoid = char:WaitForChild("Humanoid", 10)
+    task.wait(1) 
+    equipWeapon()
+    char.ChildRemoved:Connect(function(child)
+        if child.Name == "Sword" then task.wait() equipWeapon() end
+    end)
+end)
+if player.Character then task.wait(1) equipWeapon() end
+
+------------------------------------------------------------------
+-- 2. 몬스터 스폰 시스템
+------------------------------------------------------------------
+local MOB_DATA = {
+    ["초보 몹"] = { ModelName = "ZombieModel", MaxHealth = 100, WalkSpeed = 0 },
+    ["중수 몹"] = { ModelName = "StrongZombie", MaxHealth = 500, WalkSpeed = 0 },
+    ["보스"] = { ModelName = "BossZombie", MaxHealth = 5000, WalkSpeed = 0 }
+}
+
+local mobFolder = Instance.new("Folder")
+mobFolder.Name = "PrivateMobs"
+mobFolder.Parent = Workspace
+local spawnerFolder = Workspace:WaitForChild("MobSpawners", 10)
+
+local function getZombieModel(spawnerName, color, position)
+    local data = MOB_DATA[spawnerName] or { ModelName = "ZombieModel", MaxHealth = 100, WalkSpeed = 0 }
+    local targetModelName = data.ModelName
+    local savedModel = ReplicatedStorage:FindFirstChild(targetModelName) or ReplicatedStorage:FindFirstChild("ZombieModel")
+    if not savedModel then return nil, nil end
+    
+    local model = savedModel:Clone()
+    model.Name = spawnerName
+    model:PivotTo(CFrame.new(position + Vector3.new(0, 3, 0)))
+    
+    local humanoid = model:FindFirstChild("Humanoid") or Instance.new("Humanoid", model)
+    humanoid.MaxHealth = data.MaxHealth
+    humanoid.Health = data.MaxHealth
+    humanoid.WalkSpeed = data.WalkSpeed
+    
+    for _, part in pairs(model:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.Anchored = true
+            part.CanCollide = false
+            part.CanTouch = true
+        end
+    end
+
+    local head = model:FindFirstChild("Head") or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+    if head then
+        local bg = Instance.new("BillboardGui")
+        bg.Name = "HealthBarGui"
+        bg.Adornee = head
+        bg.Size = UDim2.new(5, 0, 1, 0)
+        bg.StudsOffset = Vector3.new(0, 3, 0)
+        bg.AlwaysOnTop = true
+        bg.Parent = model
+        
+        local barBg = Instance.new("Frame")
+        barBg.Size = UDim2.new(1, 0, 0.25, 0)
+        barBg.Position = UDim2.new(0, 0, 0.6, 0)
+        barBg.BackgroundColor3 = Color3.new(0,0,0)
+        barBg.BorderSizePixel = 0
+        barBg.Parent = bg
+        
+        local healthFill = Instance.new("Frame")
+        healthFill.Size = UDim2.new(1, 0, 1, 0)
+        healthFill.BackgroundColor3 = Color3.fromRGB(85, 255, 127)
+        healthFill.BorderSizePixel = 0
+        healthFill.Parent = barBg
+        
+        local nameLabel = Instance.new("TextLabel")
+        nameLabel.Size = UDim2.new(1, 0, 0.5, 0)
+        nameLabel.BackgroundTransparency = 1
+        nameLabel.Text = spawnerName .. " [HP: " .. math.floor(humanoid.Health) .. "]"
+        nameLabel.TextColor3 = Color3.new(1,1,1)
+        nameLabel.TextStrokeTransparency = 0
+        nameLabel.Font = Enum.Font.FredokaOne
+        nameLabel.TextScaled = true
+        nameLabel.Parent = bg
+        
+        humanoid.HealthChanged:Connect(function(health)
+            local ratio = health / humanoid.MaxHealth
+            healthFill:TweenSize(UDim2.new(ratio, 0, 1, 0), "Out", "Quad", 0.1, true)
+            nameLabel.Text = spawnerName .. " [HP: " .. math.floor(health) .. "]"
+            if ratio < 0.3 then healthFill.BackgroundColor3 = Color3.fromRGB(255, 85, 85)
+            else healthFill.BackgroundColor3 = Color3.fromRGB(85, 255, 127) end
+        end)
+    end
+    
+    return model, humanoid
+end
+
+local function spawnMobAt(spawnPart)
+    if not spawnPart then return end
+    spawnPart.Anchored = true
+    spawnPart.Transparency = 1 
+    local mobName = spawnPart.Name 
+    local mob, humanoid = getZombieModel(mobName, spawnPart.Color, spawnPart.Position)
+    if not mob then return end
+    
+    mob.Parent = mobFolder
+    local debounce = false
+    
+    for _, part in pairs(mob:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.Touched:Connect(function(hit)
+                if debounce then return end
+                
+                local tool = hit.Parent
+                if tool:IsA("Tool") and tool.Parent == player.Character and hit.Name == "Handle" then
+                    local isAttacking = tool:GetAttribute("IsAttacking")
+                    if isAttacking == true then
+                        debounce = true
+                        local damage = tool:GetAttribute("Damage") or 10
+                        humanoid:TakeDamage(damage)
+                        
+                        spawn(function()
+                            local oldColor = part.Color
+                            part.Color = Color3.new(1, 0, 0)
+                            task.wait(0.1)
+                            part.Color = oldColor
+                        end)
+                        
+                        if humanoid.Health <= 0 then
+                            remotes.MobKill:FireServer(mobName)
+                            mob:Destroy()
+                            task.wait(3) 
+                            spawnMobAt(spawnPart)
+                        else
+                            task.wait(0.2) 
+                            debounce = false
+                        end
+                    end
+                end
+            end)
+        end
+    end
+end
+
+if spawnerFolder then
+    for _, spawner in pairs(spawnerFolder:GetChildren()) do
+        if spawner:IsA("BasePart") then
+            spawnMobAt(spawner)
+        end
+    end
+end
+
+RunService.RenderStepped:Connect(function()
+    local char = player.Character
+    if not char then return end
+    local tool = char:FindFirstChild("Sword")
+    local stats = player:FindFirstChild("leaderstats")
+    
+    if tool and tool:FindFirstChild("Handle") and stats then
+        local level = stats.Level.Value
+        local handle = tool.Handle
+        local currentLength = 4 + (level * 0.5)
+        handle.Size = Vector3.new(1, 1, currentLength)
+        
+        local gripPos = currentLength / 2
+        tool.Grip = CFrame.new(0, 0, gripPos) * CFrame.Angles(math.rad(0), math.rad(90), math.rad(-90))
+    end
+end)
