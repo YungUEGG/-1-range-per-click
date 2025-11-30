@@ -1,0 +1,71 @@
+--[[
+    [검 공격 스크립트 v9 - 정상 작동 버전 복구]
+    수정 사항: 
+    1. 애니메이션 ID를 '522635514' (기본 베기)로 복구 (가장 안정적임)
+    2. 공격 속성(IsAttacking, Damage) 설정 유지
+]]
+
+local tool = script.Parent
+local player = game.Players.LocalPlayer
+local remotes = game:GetService("ReplicatedStorage"):WaitForChild("Remotes")
+
+local COOLDOWN = 0.5 
+local canAttack = true
+
+-- [중요] 사용자분이 "된다!"라고 했던 그 애니메이션 ID
+local animId = "rbxassetid://522635514" 
+local slashTrack = nil
+
+local autoVal = player:WaitForChild("AutoClickState", 5)
+
+-- 검 스탯 초기화
+tool:SetAttribute("IsAttacking", false)
+tool:SetAttribute("Damage", 20) -- 기본 데미지 20
+
+tool.Equipped:Connect(function()
+	local char = player.Character
+	if char then
+		local humanoid = char:FindFirstChild("Humanoid")
+		local animator = humanoid:FindFirstChild("Animator") or humanoid:WaitForChild("Animator")
+
+		local anim = Instance.new("Animation")
+		anim.AnimationId = animId
+		slashTrack = animator:LoadAnimation(anim)
+		slashTrack.Priority = Enum.AnimationPriority.Action
+	end
+end)
+
+local function attack()
+	if not canAttack then return end
+	canAttack = false
+
+	-- 공격 상태 ON
+	tool:SetAttribute("IsAttacking", true)
+
+	if slashTrack then
+		slashTrack:Play()
+		slashTrack:AdjustSpeed(1.5) 
+	end
+
+	remotes.GainExp:FireServer()
+
+	-- 판정 시간 (애니메이션 길이만큼)
+	task.wait(0.3) 
+	tool:SetAttribute("IsAttacking", false) -- 공격 상태 OFF
+
+	task.wait(COOLDOWN - 0.3)
+	canAttack = true
+end
+
+tool.Activated:Connect(function()
+	attack()
+end)
+
+task.spawn(function()
+	while true do
+		task.wait(0.8) 
+		if autoVal and autoVal.Value == true and tool.Parent == player.Character then
+			attack()
+		end
+	end
+end)
