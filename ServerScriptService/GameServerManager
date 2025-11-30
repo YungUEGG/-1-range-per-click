@@ -1,0 +1,144 @@
+--[[
+    [서버 매니저 v3 - 환생 로직 추가]
+    수정 사항:
+    1. Rebirth 리모트 이벤트 처리 추가
+    2. 환생 시 레벨/경험치 초기화, 배수 증가, 최대 레벨 증가
+]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- 리모트 이벤트 자동 생성
+local remoteFolder = ReplicatedStorage:FindFirstChild("Remotes")
+if not remoteFolder then
+	remoteFolder = Instance.new("Folder")
+	remoteFolder.Name = "Remotes"
+	remoteFolder.Parent = ReplicatedStorage
+end
+
+local function createRemote(name)
+	if not remoteFolder:FindFirstChild(name) then
+		local re = Instance.new("RemoteEvent")
+		re.Name = name
+		re.Parent = remoteFolder
+	end
+end
+
+createRemote("GainExp") 
+createRemote("MobKill") 
+createRemote("UpdateStats")
+createRemote("Rebirth") -- [신규] 환생 요청용
+
+-- 설정
+local BASE_EXP = 10 
+local BASE_EXP_REQ = 100 
+local EXP_EXPONENT = 1.14 
+local BASE_MAX_LEVEL = 25 
+
+Players.PlayerAdded:Connect(function(player)
+	-- 리더보드
+	local leaderstats = Instance.new("Folder")
+	leaderstats.Name = "leaderstats"
+	leaderstats.Parent = player
+
+	local level = Instance.new("IntValue")
+	level.Name = "Level"
+	level.Value = 1
+	level.Parent = leaderstats
+
+	local rebirth = Instance.new("IntValue")
+	rebirth.Name = "Rebirth"
+	rebirth.Value = 0
+	rebirth.Parent = leaderstats
+
+	local coins = Instance.new("IntValue")
+	coins.Name = "Coins"
+	coins.Value = 0
+	coins.Parent = leaderstats
+
+	-- 숨겨진 스탯
+	local hidden = Instance.new("Folder")
+	hidden.Name = "HiddenStats"
+	hidden.Parent = player
+
+	local currentExp = Instance.new("IntValue")
+	currentExp.Name = "CurrentExp"
+	currentExp.Value = 0
+	currentExp.Parent = hidden
+
+	local maxExp = Instance.new("IntValue")
+	maxExp.Name = "MaxExp"
+	maxExp.Value = BASE_EXP_REQ
+	maxExp.Parent = hidden
+
+	local robuxMult = Instance.new("IntValue")
+	robuxMult.Name = "RobuxMultiplier"
+	robuxMult.Value = 1 
+	robuxMult.Parent = hidden
+end)
+
+local function calculateMultiplier(player)
+	local rebirth = player.leaderstats.Rebirth.Value
+	local robuxMult = player.HiddenStats.RobuxMultiplier.Value
+
+	-- 환생 배수: 환생당 0.5배씩 추가 (1 -> 1.5 -> 2.0 ...)
+	local rebirthMult = 1 + (rebirth * 0.5)
+	return robuxMult * rebirthMult
+end
+
+-- 경험치 (배수 적용)
+remoteFolder.GainExp.OnServerEvent:Connect(function(player)
+	local stats = player:FindFirstChild("leaderstats")
+	local hidden = player:FindFirstChild("HiddenStats")
+	if not stats then return end
+
+	-- 현재 환생 횟수에 따른 만렙 제한
+	local levelCap = BASE_MAX_LEVEL + (stats.Rebirth.Value * 25)
+	if stats.Level.Value >= levelCap then return end
+
+	local amount = BASE_EXP * calculateMultiplier(player)
+	hidden.CurrentExp.Value = hidden.CurrentExp.Value + amount
+
+	if hidden.CurrentExp.Value >= hidden.MaxExp.Value then
+		hidden.CurrentExp.Value = hidden.CurrentExp.Value - hidden.MaxExp.Value
+		stats.Level.Value = stats.Level.Value + 1
+		hidden.MaxExp.Value = math.floor(BASE_EXP_REQ * (EXP_EXPONENT ^ (stats.Level.Value - 1)))
+	end
+
+	remoteFolder.UpdateStats:FireClient(player)
+end)
+
+-- 몹 처치 (돈 획득)
+remoteFolder.MobKill.OnServerEvent:Connect(function(player, mobName)
+	local coins = player.leaderstats.Coins
+	-- 일단 고정값 10, 나중에 몹마다 다르게 설정 가능
+	coins.Value = coins.Value + 10 
+end)
+
+-- [신규] 환생 처리
+remoteFolder.Rebirth.OnServerEvent:Connect(function(player)
+	local stats = player:FindFirstChild("leaderstats")
+	local hidden = player:FindFirstChild("HiddenStats")
+	if not stats then return end
+
+	local level = stats.Level
+	local rebirth = stats.Rebirth
+
+	-- 환생 조건: 레벨 25 + (환생횟수 * 25)
+	local requiredLevel = BASE_MAX_LEVEL + (rebirth.Value * 25)
+
+	if level.Value >= requiredLevel then
+		-- 환생 성공!
+		rebirth.Value = rebirth.Value + 1
+
+		-- 레벨 및 경험치 초기화
+		level.Value = 1
+		hidden.CurrentExp.Value = 0
+		hidden.MaxExp.Value = BASE_EXP_REQ -- 초기 필요 경험치(100)로 복귀
+
+		print(player.Name .. "님 환생 성공! 현재 환생: " .. rebirth.Value)
+
+		-- (선택) 환생하면 캐릭터를 리스폰시켜서 처음부터 다시 하는 느낌 주기
+		player:LoadCharacter()
+	end
+end)
