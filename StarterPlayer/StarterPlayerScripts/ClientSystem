@@ -1,8 +1,12 @@
 --[[
-    [클라이언트 시스템 통합 v24 - 만렙 경험치 표기 수정]
-    수정 사항:
-    1. 만렙 이후에도 '누적 경험치'가 텍스트에 실시간으로 반영되도록 수정
-    2. 레벨업 애니메이션 스킵 로직 최적화
+    [클라이언트 시스템 통합 v46 - 공격 판정 범위 수정]
+    위치: StarterPlayerScripts > ClientSystem
+    
+    [수정 사항]
+    1. 공격 판정(Hit Detection) 수정: 
+       - 기존: Handle에 닿았을 때만 공격 인정
+       - 변경: Handle(손잡이) 또는 Blade(칼날)에 닿았을 때 공격 인정
+    2. 이전 수정 사항(성장 축 Y, 위치 보정, UI 등) 모두 유지
 ]]
 
 local Players = game:GetService("Players")
@@ -11,18 +15,26 @@ local Workspace = game:GetService("Workspace")
 local StarterGui = game:GetService("StarterGui")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
-local Camera = Workspace.CurrentCamera
 
 local player = Players.LocalPlayer
-local remotes = ReplicatedStorage:WaitForChild("Remotes")
+local remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+local ShopConfig = require(ReplicatedStorage:WaitForChild("ShopConfig", 10))
 
--- 맵 로딩 대기
-task.wait(3)
+-- [안전장치]
+if not remotes or not ShopConfig then
+	warn("필수 요소(Remotes 또는 ShopConfig)를 찾을 수 없습니다!")
+	return
+end
+
+-- 로딩 대기
+print("ClientSystem: 로딩 시작...")
+task.wait(1)
 
 ------------------------------------------------------------------
--- 0. UI 시스템 (환생 & 경험치바)
+-- 0. 공통 UI 함수
 ------------------------------------------------------------------
 local uiConnections = {} 
+local currentSelectedID = 1 
 
 local function clearUIConnections()
 	for _, conn in pairs(uiConnections) do
@@ -31,7 +43,7 @@ local function clearUIConnections()
 	uiConnections = {}
 end
 
-local function addHoverEffect(btn, cornerRadius)
+local function addHoverEffect(btn)
 	if not btn then return end
 	if btn:FindFirstChild("HoverShade") then btn.HoverShade:Destroy() end
 
@@ -40,24 +52,21 @@ local function addHoverEffect(btn, cornerRadius)
 	hoverFrame.Size = UDim2.new(1, 0, 1, 0)
 	hoverFrame.BackgroundColor3 = Color3.new(0, 0, 0)
 	hoverFrame.BackgroundTransparency = 1 
-	hoverFrame.ZIndex = btn.ZIndex + 1 
+	hoverFrame.ZIndex = (btn.ZIndex or 1) + 10 
 	hoverFrame.Parent = btn
 
-	if cornerRadius then
-		local corner = Instance.new("UICorner")
-		corner.CornerRadius = cornerRadius
-		corner.Parent = hoverFrame
-	end
+	local corner = btn:FindFirstChild("UICorner") and btn.UICorner:Clone() or Instance.new("UICorner")
+	if not btn:FindFirstChild("UICorner") then corner.CornerRadius = UDim.new(0, 8) end
+	corner.Parent = hoverFrame
 
-	table.insert(uiConnections, btn.MouseEnter:Connect(function()
-		TweenService:Create(hoverFrame, TweenInfo.new(0.2), {BackgroundTransparency = 0.7}):Play()
-	end))
-	table.insert(uiConnections, btn.MouseLeave:Connect(function()
+	btn.MouseEnter:Connect(function()
+		TweenService:Create(hoverFrame, TweenInfo.new(0.2), {BackgroundTransparency = 0.8}):Play()
+	end)
+	btn.MouseLeave:Connect(function()
 		TweenService:Create(hoverFrame, TweenInfo.new(0.2), {BackgroundTransparency = 1}):Play()
-	end))
+	end)
 end
 
--- 하단 경험치 바 생성 함수
 local function createExpBar(screenGui)
 	if screenGui:FindFirstChild("ExpBarBackground") then return screenGui.ExpBarBackground end
 
@@ -75,6 +84,7 @@ local function createExpBar(screenGui)
 	fill.Size = UDim2.new(0, 0, 1, 0)
 	fill.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
 	fill.BorderSizePixel = 0
+	fill.ZIndex = 0 
 	fill.Parent = expBg
 
 	local txt = Instance.new("TextLabel")
@@ -83,134 +93,289 @@ local function createExpBar(screenGui)
 	txt.BackgroundTransparency = 1
 	txt.Text = "Loading..."
 	txt.TextColor3 = Color3.new(1, 1, 1)
-	txt.Font = Enum.Font.FredokaOne
+	txt.Font = Enum.Font.LuckiestGuy 
 	txt.TextScaled = true
+	txt.ZIndex = 1 
 	txt.Parent = expBg
 
 	return expBg
 end
 
+------------------------------------------------------------------
+-- 1. 메인 UI 연결 함수
+------------------------------------------------------------------
 local function connectGameUI()
 	clearUIConnections()
+	print("ClientSystem: UI 연결 시도 중...")
 
-	local playerGui = player:WaitForChild("PlayerGui")
+	local playerGui = player:WaitForChild("PlayerGui", 10)
+	if not playerGui then return end 
+
 	local hud = playerGui:FindFirstChild("GameHUD")
 	if not hud then
 		hud = Instance.new("ScreenGui")
 		hud.Name = "GameHUD"
 		hud.ResetOnSpawn = false
+		hud.DisplayOrder = 1 
 		hud.Parent = playerGui
 	end
-
 	hud.ResetOnSpawn = false
 
-	-- === 1. 환생 UI 연결 ===
+	-- 스탯 로딩
+	local leaderstats = player:WaitForChild("leaderstats", 5)
+	local hidden = player:WaitForChild("HiddenStats", 5)
+
+	if not leaderstats or not hidden then
+		warn("스탯 로딩 실패! 다시 시도합니다.")
+		task.delay(1, connectGameUI) 
+		return 
+	end
+
+	local level = leaderstats:WaitForChild("Level", 5)
+	local rebirth = leaderstats:WaitForChild("Rebirth", 5)
+	local coins = leaderstats:WaitForChild("Coins", 5)
+	local currentExp = hidden:WaitForChild("CurrentExp", 5)
+	local maxExp = hidden:WaitForChild("MaxExp", 5)
+	local equippedID = hidden:WaitForChild("EquippedSwordID", 5)
+
+	if not (level and rebirth and coins and currentExp and maxExp and equippedID) then
+		warn("세부 스탯 로딩 실패")
+		return
+	end
+
+	-- ==========================================================
+	-- [A] 상점 시스템
+	-- ==========================================================
+	local shopGui = playerGui:WaitForChild("ShopGui", 5)
+	local shopFrame = shopGui and shopGui:FindFirstChild("ShopFrame")
+
+	if shopFrame then
+		local container = shopFrame:FindFirstChild("ItemsContainer")
+		local template = container and container:FindFirstChild("ItemTemplate")
+		local rightPanel = shopFrame:FindFirstChild("RightPanel") 
+		local closeBtn = shopFrame:FindFirstChild("CloseBtn")
+
+		local previewName = rightPanel and rightPanel:FindFirstChild("PreviewName")
+		local previewImage = rightPanel and rightPanel:FindFirstChild("PreviewImage")
+		local previewStats = rightPanel and rightPanel:FindFirstChild("PreviewStats")
+		local previewPrice = rightPanel and rightPanel:FindFirstChild("PreviewPrice")
+		local actionBtn = rightPanel and rightPanel:FindFirstChild("ActionBtn")
+
+		addHoverEffect(actionBtn)
+
+		local function updateListVisuals()
+			if not container then return end
+			for _, item in pairs(container:GetChildren()) do
+				if item:IsA("GuiObject") and item.Name:match("Item_") then
+					local idStr = item.Name:gsub("Item_", "")
+					local id = tonumber(idStr)
+
+					local normalBG = item:FindFirstChild("NormalBG")
+					local selectedBG = item:FindFirstChild("SelectedBG")
+
+					if normalBG and selectedBG then
+						selectedBG.Visible = (id == currentSelectedID)
+						normalBG.Visible = (id ~= currentSelectedID)
+					else
+						if id == currentSelectedID then
+							item.BackgroundColor3 = Color3.fromRGB(255, 255, 200)
+						else
+							item.BackgroundColor3 = Color3.fromRGB(200, 200, 200)
+						end
+					end
+				end
+			end
+		end
+
+		local function updatePreview(id)
+			currentSelectedID = id
+			updateListVisuals()
+
+			local data = ShopConfig[id]
+			if not data then return end
+
+			if previewName then 
+				previewName.Text = data.Name 
+				previewName.Font = Enum.Font.LuckiestGuy 
+			end
+			if previewImage then previewImage.Image = data.ImageId end
+
+			if previewStats then 
+				local dmg = data.Damage or 10
+				local exp = data.ExpAmount or 10
+				previewStats.Text = "ATK +" .. dmg .. "\nEXP +" .. exp
+				previewStats.Font = Enum.Font.LuckiestGuy 
+			end
+
+			local ownedStr = player:GetAttribute("OwnedSwords") or ""
+			local hasItem = string.find(ownedStr, id .. ",")
+			local isEquipped = (equippedID.Value == id)
+
+			if actionBtn and previewPrice then
+				actionBtn.Font = Enum.Font.LuckiestGuy 
+				previewPrice.Font = Enum.Font.LuckiestGuy 
+
+				if isEquipped then
+					actionBtn.Text = "장착 중"
+					actionBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+					actionBtn.Active = false
+					previewPrice.Text = "보유중"
+				elseif hasItem then
+					actionBtn.Text = "장착하기"
+					actionBtn.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+					actionBtn.Active = true
+					previewPrice.Text = "보유중"
+				else
+					actionBtn.Text = "구매하기"
+					actionBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+					actionBtn.Active = true
+					previewPrice.Text = "💰 " .. data.Price
+				end
+			end
+		end
+
+		if container and template then
+			template.Visible = false
+			for _, child in pairs(container:GetChildren()) do
+				if child ~= template and not child:IsA("UILayout") then child:Destroy() end
+			end
+
+			local sortedIds = {}
+			for id, _ in pairs(ShopConfig) do table.insert(sortedIds, id) end
+			table.sort(sortedIds)
+
+			for _, id in ipairs(sortedIds) do
+				local data = ShopConfig[id]
+				local item = template:Clone()
+				item.Name = "Item_" .. id
+				item.Visible = true
+				item.Parent = container
+
+				if item:FindFirstChild("ItemName") then 
+					item.ItemName.Text = data.Name 
+					item.ItemName.Font = Enum.Font.LuckiestGuy 
+				end
+				if item:FindFirstChild("ItemImage") then item.ItemImage.Image = data.ImageId end
+
+				if item:FindFirstChild("ItemPrice") then 
+					item.ItemPrice.Font = Enum.Font.LuckiestGuy 
+					if data.Price == 0 then item.ItemPrice.Text = "Free"
+					else item.ItemPrice.Text = "💰" .. data.Price end
+				end
+
+				local clickFunc = function() updatePreview(id) end
+				if item:IsA("GuiButton") then item.MouseButton1Click:Connect(clickFunc)
+				else
+					local btn = item:FindFirstChildWhichIsA("GuiButton")
+					if btn then btn.MouseButton1Click:Connect(clickFunc)
+					else
+						local touchBtn = Instance.new("TextButton")
+						touchBtn.Size = UDim2.new(1,0,1,0)
+						touchBtn.BackgroundTransparency = 1
+						touchBtn.Text = ""
+						touchBtn.Parent = item
+						touchBtn.MouseButton1Click:Connect(clickFunc)
+					end
+				end
+			end
+		end
+
+		if actionBtn then
+			actionBtn.MouseButton1Click:Connect(function()
+				local id = currentSelectedID
+				local data = ShopConfig[id]
+				local ownedStr = player:GetAttribute("OwnedSwords") or ""
+				local hasItem = string.find(ownedStr, id .. ",")
+
+				if hasItem then
+					remotes.EquipItem:FireServer(id)
+				else
+					if coins.Value >= data.Price then
+						remotes.BuyItem:FireServer(id)
+					else
+						local oldText = actionBtn.Text
+						actionBtn.Text = "돈이 부족해요!"
+						actionBtn.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
+						task.wait(1)
+						updatePreview(id)
+					end
+				end
+			end)
+		end
+		if closeBtn then closeBtn.MouseButton1Click:Connect(function() shopFrame.Visible = false end) end
+
+		local function refresh() updatePreview(currentSelectedID) end
+		table.insert(uiConnections, equippedID.Changed:Connect(refresh))
+		table.insert(uiConnections, player.AttributeChanged:Connect(refresh))
+		table.insert(uiConnections, remotes.UpdateStats.OnClientEvent:Connect(refresh))
+
+		task.delay(0.5, function()
+			currentSelectedID = equippedID.Value or 1
+			updatePreview(currentSelectedID)
+		end)
+	end
+
+	local shopZone = Workspace:WaitForChild("ShopZone", 10)
+	if shopZone and shopFrame then
+		RunService.RenderStepped:Connect(function()
+			local char = player.Character
+			if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+			if (char.HumanoidRootPart.Position - shopZone.Position).Magnitude < 12 then
+				if not shopFrame.Visible then
+					shopFrame.Visible = true
+					if equippedID then updatePreview(equippedID.Value) end
+				end
+			else
+				if shopFrame.Visible then shopFrame.Visible = false end
+			end
+		end)
+	end
+
+	-- ==========================================================
+	-- [B] 환생 시스템
+	-- ==========================================================
 	local rebirthFrame = hud:FindFirstChild("RebirthFrame", true)
 	local openBtn = hud:FindFirstChild("OpenRebirthBtn", true)
 
 	if openBtn then openBtn.Visible = true end
-	if rebirthFrame then rebirthFrame.Visible = false end
+
+	if rebirthFrame then
+		rebirthFrame.ZIndex = 100 
+		for _, desc in pairs(rebirthFrame:GetDescendants()) do
+			if desc:IsA("GuiObject") then
+				desc.ZIndex = desc.ZIndex + 100
+			end
+		end
+	end
 
 	local doRebirthBtn = rebirthFrame and rebirthFrame:FindFirstChild("DoRebirthBtn", true)
-	local closeBtn = rebirthFrame and rebirthFrame:FindFirstChild("CloseBtn", true)
+	local closeRebirthBtn = rebirthFrame and rebirthFrame:FindFirstChild("CloseBtn", true)
 
 	local currentRangeLabel = rebirthFrame and rebirthFrame:FindFirstChild("CurrentRangeLabel", true)
 	local nextRangeLabel = rebirthFrame and rebirthFrame:FindFirstChild("NextRangeLabel", true)
+
 	local currentReqLabel = rebirthFrame and rebirthFrame:FindFirstChild("CurrentReqLabel", true)
 	local nextReqLabel = rebirthFrame and rebirthFrame:FindFirstChild("NextReqLabel", true)
-	local resetText = rebirthFrame and rebirthFrame:FindFirstChild("ResetText", true)
 
 	local progressBarBg = rebirthFrame and rebirthFrame:FindFirstChild("ProgressBarBg", true)
 	local progressBarFill = progressBarBg and progressBarBg:FindFirstChild("ProgressBarFill", true)
 	local progressText = progressBarBg and progressBarBg:FindFirstChild("ProgressText", true)
+	local resetText = rebirthFrame and rebirthFrame:FindFirstChild("ResetText", true)
 
 	local targetFont = Enum.Font.LuckiestGuy
 	local labels = {currentRangeLabel, nextRangeLabel, currentReqLabel, nextReqLabel, resetText, progressText}
 	for _, lbl in ipairs(labels) do if lbl then lbl.Font = targetFont end end
 
-	addHoverEffect(doRebirthBtn, UDim.new(0, 10)) 
-	addHoverEffect(closeBtn, UDim.new(0, 5))      
-	addHoverEffect(openBtn, UDim.new(0, 10))      
+	if doRebirthBtn then addHoverEffect(doRebirthBtn) end
+	if openBtn then addHoverEffect(openBtn) end
+	if closeRebirthBtn then addHoverEffect(closeRebirthBtn) end
 
-	-- === 2. 하단 경험치 바 연결 ===
-	local expBarBg = createExpBar(hud)
-	local expFill = expBarBg:FindFirstChild("ExpBarFill")
-	local expText = expBarBg:FindFirstChild("LevelText")
-
-	-- 데이터 연결
-	local leaderstats = player:WaitForChild("leaderstats")
-	local level = leaderstats:WaitForChild("Level")
-	local rebirth = leaderstats:WaitForChild("Rebirth")
-	local hidden = player:WaitForChild("HiddenStats")
-	local currentExp = hidden:WaitForChild("CurrentExp")
-	local maxExp = hidden:WaitForChild("MaxExp")
-
-	-- 시각적 레벨 (애니메이션용)
-	local visualLevel = level.Value
-
-	-- [수정] 경험치/레벨 업데이트 함수 (만렙 표기 수정)
-	local isAnimating = false
-
-	local function updateExpVisuals()
-		if isAnimating then return end 
-		isAnimating = true
-
-		local realLevel = level.Value
-		local realExp = currentExp.Value
-		local realMax = maxExp.Value
-
-		-- [버그 수정] 실제 레벨과 시각적 레벨 차이가 크면(2 이상) 애니메이션 스킵
-		if realLevel - visualLevel > 2 then
-			visualLevel = realLevel 
-		end
-
-		-- 1. 레벨업 애니메이션 (만렙이 아닐 때만)
-		while visualLevel < realLevel do
-			expFill:TweenSize(UDim2.new(1, 0, 1, 0), "Out", "Quad", 0.1, true) 
-			task.wait(0.1)
-
-			visualLevel = visualLevel + 1
-			expText.Text = string.format("RangeLV %d [ LEVEL UP! ]", visualLevel)
-
-			expFill.Size = UDim2.new(0, 0, 1, 0)
-			task.wait(0.05)
-		end
-
-		-- 2. 최종 경험치 상태로 이동
-		-- 만렙 초과 경험치여도 비율은 1(꽉 참)로 고정하되, 텍스트는 실제 값 표시
-		local ratio = math.clamp(realExp / realMax, 0, 1)
-
-		-- 만약 만렙이라 경험치가 요구량보다 많다면 바를 꽉 채운 상태로 유지
-		if realExp >= realMax then
-			ratio = 1
-		end
-
-		expFill:TweenSize(UDim2.new(ratio, 0, 1, 0), "Out", "Quad", 0.2, true)
-
-		-- [핵심] 텍스트에는 실제 누적된 경험치를 그대로 보여줌
-		expText.Text = string.format("RangeLV %d [ %d / %d ]", realLevel, realExp, realMax)
-
-		visualLevel = realLevel
-		isAnimating = false
-	end
-
-	-- 경험치가 변할 때마다 UI 업데이트 (이 부분이 중요!)
-	table.insert(uiConnections, currentExp.Changed:Connect(updateExpVisuals))
-	table.insert(uiConnections, maxExp.Changed:Connect(updateExpVisuals))
-	table.insert(uiConnections, level.Changed:Connect(updateExpVisuals))
-
-	-- 서버에서 보내주는 신호도 받음 (이중 체크)
-	table.insert(uiConnections, remotes.UpdateStats.OnClientEvent:Connect(updateExpVisuals))
-
-	updateExpVisuals()
-
-	-- === 3. 환생 정보 업데이트 ===
 	local function updateRebirthInfo()
 		local r = rebirth.Value
 		local curMult = 1 + (r * 0.5)
 		local nextMult = 1 + ((r + 1) * 0.5)
 		local currentMaxLevel = 25 + (r * 25)
-		local nextMaxLevel = 25 + ((r + 1) * 25)
+		local nextMaxLevel = 25 + ((r + 1) * 25) 
 
 		if currentRangeLabel then currentRangeLabel.Text = curMult .. "x Range" end
 		if nextRangeLabel then nextRangeLabel.Text = nextMult .. "x Range" end
@@ -232,51 +397,80 @@ local function connectGameUI()
 	table.insert(uiConnections, rebirth.Changed:Connect(updateRebirthInfo))
 	task.delay(0.1, updateRebirthInfo)
 
-	-- 버튼 연결
 	if openBtn then
-		table.insert(uiConnections, openBtn.MouseButton1Click:Connect(function()
-			if rebirthFrame then rebirthFrame.Visible = not rebirthFrame.Visible end
-		end))
+		openBtn.MouseButton1Click:Connect(function() 
+			if rebirthFrame then rebirthFrame.Visible = not rebirthFrame.Visible end 
+		end)
 	end
-
-	if closeBtn then
-		table.insert(uiConnections, closeBtn.MouseButton1Click:Connect(function()
-			if rebirthFrame then rebirthFrame.Visible = false end
-		end))
+	if closeRebirthBtn then
+		closeRebirthBtn.MouseButton1Click:Connect(function() 
+			if rebirthFrame then rebirthFrame.Visible = false end 
+		end)
 	end
-
 	if doRebirthBtn then
-		table.insert(uiConnections, doRebirthBtn.MouseButton1Click:Connect(function()
+		doRebirthBtn.MouseButton1Click:Connect(function()
 			local currentMaxLevel = 25 + (rebirth.Value * 25)
 			if level.Value >= currentMaxLevel then
 				remotes.Rebirth:FireServer()
-
-				doRebirthBtn:TweenSize(UDim2.new(doRebirthBtn.Size.X.Scale * 0.9, 0, doRebirthBtn.Size.Y.Scale * 0.9, 0), "Out", "Quad", 0.1, true)
-				task.wait(0.1)
-				doRebirthBtn:TweenSize(UDim2.new(doRebirthBtn.Size.X.Scale / 0.9, 0, doRebirthBtn.Size.Y.Scale / 0.9, 0), "Out", "Quad", 0.1, true)
-
-				task.wait(0.2)
 				if rebirthFrame then rebirthFrame.Visible = false end
-
-				visualLevel = 1
-				expFill.Size = UDim2.new(0,0,1,0)
-				expText.Text = "RangeLV 1 [ 0 / 100 ]"
-			else
-				print("레벨 부족")
 			end
-		end))
+		end)
 	end
+
+	-- ==========================================================
+	-- [C] 경험치 바 시스템
+	-- ==========================================================
+	local expBarBg = createExpBar(hud)
+	local expFill = expBarBg:FindFirstChild("ExpBarFill")
+	local expText = expBarBg:FindFirstChild("LevelText")
+
+	local visualLevel = level.Value
+	local isAnimating = false
+
+	local function updateExpVisuals()
+		if isAnimating then return end 
+		isAnimating = true
+
+		local realLevel = level.Value
+		local realExp = currentExp.Value
+		local realMax = maxExp.Value
+		if realMax <= 0 then realMax = 100 end
+
+		if realLevel - visualLevel > 2 then visualLevel = realLevel end
+
+		while visualLevel < realLevel do
+			expFill:TweenSize(UDim2.new(1, 0, 1, 0), "Out", "Quad", 0.1, true) 
+			task.wait(0.1)
+			visualLevel = visualLevel + 1
+			expText.Text = string.format("RangeLV %d [ LEVEL UP! ]", visualLevel)
+			expFill.Size = UDim2.new(0, 0, 1, 0)
+			task.wait(0.05)
+		end
+
+		local ratio = math.clamp(realExp / realMax, 0, 1)
+		if realExp >= realMax then ratio = 1 end
+		expFill:TweenSize(UDim2.new(ratio, 0, 1, 0), "Out", "Quad", 0.2, true)
+		expText.Text = string.format("RangeLV %d [ %d / %d ]", realLevel, realExp, realMax)
+
+		visualLevel = realLevel
+		isAnimating = false
+	end
+
+	table.insert(uiConnections, currentExp.Changed:Connect(updateExpVisuals))
+	table.insert(uiConnections, maxExp.Changed:Connect(updateExpVisuals))
+	table.insert(uiConnections, level.Changed:Connect(updateExpVisuals))
+	table.insert(uiConnections, remotes.UpdateStats.OnClientEvent:Connect(updateExpVisuals))
+	updateExpVisuals()
+
+	print("ClientSystem: UI 연결 완료!")
 end
 
 task.spawn(connectGameUI)
+player.CharacterAdded:Connect(function() task.wait(1) connectGameUI() end)
 
-player.CharacterAdded:Connect(function()
-	task.wait(1) 
-	connectGameUI()
-end)
 
 ------------------------------------------------------------------
--- 1. 무기 시스템 (유지)
+-- 2. 무기 및 몬스터 시스템 (검 성장 Y축 적용)
 ------------------------------------------------------------------
 pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false) end)
 
@@ -286,29 +480,43 @@ local function equipWeapon()
 	local humanoid = character:FindFirstChild("Humanoid")
 	if not humanoid then return end
 
+	local hidden = player:FindFirstChild("HiddenStats")
+	local equippedID = hidden and hidden:FindFirstChild("EquippedSwordID") and hidden.EquippedSwordID.Value or 1
+	local swordData = ShopConfig[equippedID]
+	local damageVal = swordData and swordData.Damage or 10
+
 	local currentTool = character:FindFirstChild("Sword")
 	if not currentTool then
 		local swordOrigin = ReplicatedStorage:FindFirstChild("Sword")
 		if swordOrigin then
 			local newSword = swordOrigin:Clone()
 			local handle = newSword:FindFirstChild("Handle")
-
 			if handle then
 				handle.Anchored = false
 				handle.CanCollide = false 
 				handle.Massless = true
 				handle.CanTouch = true
 			end
-
+			newSword:SetAttribute("Damage", damageVal) 
 			newSword.Parent = player.Backpack
 			humanoid:EquipTool(newSword)
-			newSword.Grip = CFrame.new(0, 0, 2) * CFrame.Angles(math.rad(0), math.rad(90), math.rad(-90))
 		end
+	else
+		currentTool:SetAttribute("Damage", damageVal)
+	end
+end
+
+local hidden = player:WaitForChild("HiddenStats", 10)
+if hidden then
+	local eqID = hidden:WaitForChild("EquippedSwordID", 10)
+	if eqID then
+		eqID.Changed:Connect(function()
+			equipWeapon()
+		end)
 	end
 end
 
 player.CharacterAdded:Connect(function(char)
-	local humanoid = char:WaitForChild("Humanoid", 10)
 	task.wait(1) 
 	equipWeapon()
 	char.ChildRemoved:Connect(function(child)
@@ -317,15 +525,50 @@ player.CharacterAdded:Connect(function(char)
 end)
 if player.Character then task.wait(1) equipWeapon() end
 
-------------------------------------------------------------------
--- 2. 몬스터 스폰 시스템 (유지)
-------------------------------------------------------------------
+-- [핵심 수정] 렌더스텝: 검 성장 로직 (Y축 길이 사용 & 0 나누기 방지)
+RunService.RenderStepped:Connect(function()
+	local char = player.Character
+	if not char then return end
+	local tool = char:FindFirstChild("Sword")
+
+	if tool and tool:FindFirstChild("Handle") and tool:FindFirstChild("Blade") then
+		local handle = tool.Handle
+		local blade = tool.Blade
+		local level = player.leaderstats.Level.Value
+
+		-- 기본 길이
+		local baseLength = 4 
+		local addedLength = (level - 1) * 0.5 
+		local currentLength = baseLength + addedLength
+
+		-- 1. 블레이드 Y축 길이 늘리기 (X/Z는 원래 크기 유지)
+		blade.Size = Vector3.new(blade.Size.X, currentLength, blade.Size.Z)
+
+		-- 2. Weld 보정
+		local weld = blade:FindFirstChild("BladeWeld") or handle:FindFirstChild("BladeWeld")
+		if not weld then
+			weld = Instance.new("Weld")
+			weld.Name = "BladeWeld"
+			weld.Part0 = handle
+			weld.Part1 = blade
+			weld.Parent = blade
+
+			-- 초기 위치: (필요하면 값 조절)
+			weld.C0 = CFrame.new(0, 0.3, 0)
+		end
+
+		-- [위치 이동] Y축으로 중심 이동
+		-- (길이의 절반)만큼 -방향으로 이동시켜야 '밑바닥'이 손잡이에 붙어있게 됨
+		-- 만약 거꾸로 자란다면 -currentLength / 2를 +currentLength / 2로 바꾸세요.
+		weld.C1 = CFrame.new(0, -currentLength / 2, 0)
+	end
+end)
+
 local MOB_DATA = {
 	["초보 몹"] = { ModelName = "ZombieModel", MaxHealth = 100, WalkSpeed = 0 },
 	["중수 몹"] = { ModelName = "StrongZombie", MaxHealth = 500, WalkSpeed = 0 },
 	["보스"] = { ModelName = "BossZombie", MaxHealth = 5000, WalkSpeed = 0 }
 }
-
 local mobFolder = Instance.new("Folder")
 mobFolder.Name = "PrivateMobs"
 mobFolder.Parent = Workspace
@@ -345,7 +588,6 @@ local function getZombieModel(spawnerName, color, position)
 	humanoid.MaxHealth = data.MaxHealth
 	humanoid.Health = data.MaxHealth
 	humanoid.WalkSpeed = data.WalkSpeed
-
 	for _, part in pairs(model:GetDescendants()) do
 		if part:IsA("BasePart") then
 			part.Anchored = true
@@ -353,7 +595,6 @@ local function getZombieModel(spawnerName, color, position)
 			part.CanTouch = true
 		end
 	end
-
 	local head = model:FindFirstChild("Head") or model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
 	if head then
 		local bg = Instance.new("BillboardGui")
@@ -363,30 +604,23 @@ local function getZombieModel(spawnerName, color, position)
 		bg.StudsOffset = Vector3.new(0, 3, 0)
 		bg.AlwaysOnTop = true
 		bg.Parent = model
-
 		local barBg = Instance.new("Frame")
 		barBg.Size = UDim2.new(1, 0, 0.25, 0)
 		barBg.Position = UDim2.new(0, 0, 0.6, 0)
 		barBg.BackgroundColor3 = Color3.new(0,0,0)
-		barBg.BorderSizePixel = 0
 		barBg.Parent = bg
-
 		local healthFill = Instance.new("Frame")
 		healthFill.Size = UDim2.new(1, 0, 1, 0)
 		healthFill.BackgroundColor3 = Color3.fromRGB(85, 255, 127)
-		healthFill.BorderSizePixel = 0
 		healthFill.Parent = barBg
-
 		local nameLabel = Instance.new("TextLabel")
 		nameLabel.Size = UDim2.new(1, 0, 0.5, 0)
 		nameLabel.BackgroundTransparency = 1
 		nameLabel.Text = spawnerName .. " [HP: " .. math.floor(humanoid.Health) .. "]"
 		nameLabel.TextColor3 = Color3.new(1,1,1)
-		nameLabel.TextStrokeTransparency = 0
 		nameLabel.Font = Enum.Font.FredokaOne
 		nameLabel.TextScaled = true
 		nameLabel.Parent = bg
-
 		humanoid.HealthChanged:Connect(function(health)
 			local ratio = health / humanoid.MaxHealth
 			healthFill:TweenSize(UDim2.new(ratio, 0, 1, 0), "Out", "Quad", 0.1, true)
@@ -395,41 +629,32 @@ local function getZombieModel(spawnerName, color, position)
 			else healthFill.BackgroundColor3 = Color3.fromRGB(85, 255, 127) end
 		end)
 	end
-
 	return model, humanoid
 end
-
 local function spawnMobAt(spawnPart)
 	if not spawnPart then return end
-	spawnPart.Anchored = true
 	spawnPart.Transparency = 1 
 	local mobName = spawnPart.Name 
 	local mob, humanoid = getZombieModel(mobName, spawnPart.Color, spawnPart.Position)
 	if not mob then return end
-
 	mob.Parent = mobFolder
 	local debounce = false
-
 	for _, part in pairs(mob:GetDescendants()) do
 		if part:IsA("BasePart") then
 			part.Touched:Connect(function(hit)
 				if debounce then return end
-
 				local tool = hit.Parent
-				if tool:IsA("Tool") and tool.Parent == player.Character and hit.Name == "Handle" then
+				if tool:IsA("Tool") and tool.Parent == player.Character and (hit.Name == "Handle" or hit.Name == "Blade") then
 					local isAttacking = tool:GetAttribute("IsAttacking")
 					if isAttacking == true then
 						debounce = true
 						local damage = tool:GetAttribute("Damage") or 10
 						humanoid:TakeDamage(damage)
-
 						spawn(function()
-							local oldColor = part.Color
 							part.Color = Color3.new(1, 0, 0)
 							task.wait(0.1)
-							part.Color = oldColor
+							part.Color = Color3.new(1,1,1)
 						end)
-
 						if humanoid.Health <= 0 then
 							remotes.MobKill:FireServer(mobName)
 							mob:Destroy()
@@ -445,28 +670,8 @@ local function spawnMobAt(spawnPart)
 		end
 	end
 end
-
 if spawnerFolder then
 	for _, spawner in pairs(spawnerFolder:GetChildren()) do
-		if spawner:IsA("BasePart") then
-			spawnMobAt(spawner)
-		end
+		if spawner:IsA("BasePart") then spawnMobAt(spawner) end
 	end
 end
-
-RunService.RenderStepped:Connect(function()
-	local char = player.Character
-	if not char then return end
-	local tool = char:FindFirstChild("Sword")
-	local stats = player:FindFirstChild("leaderstats")
-
-	if tool and tool:FindFirstChild("Handle") and stats then
-		local level = stats.Level.Value
-		local handle = tool.Handle
-		local currentLength = 4 + (level * 0.5)
-		handle.Size = Vector3.new(1, 1, currentLength)
-
-		local gripPos = currentLength / 2
-		tool.Grip = CFrame.new(0, 0, gripPos) * CFrame.Angles(math.rad(0), math.rad(90), math.rad(-90))
-	end
-end)
