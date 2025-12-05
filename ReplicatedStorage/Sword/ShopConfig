@@ -1,0 +1,51 @@
+--[[
+    [ShopConfig v3 - 모델 이름 연결]
+    위치: ReplicatedStorage > ShopConfig
+    수정: 각 아이템에 'ModelName'을 추가하여 실제 모델과 연결
+]]
+
+local ShopConfig = {
+	-- [ID] = { 이름, 가격, 경험치량, 데미지, 모델이름(중요), 이미지ID, 설명 }
+
+	[1] = {
+		Name = "Wooden Sword",
+		Price = 0,
+		ExpAmount = 100000,
+		Damage = 100000,
+		ModelName = "WoodenSword", -- ReplicatedStorage/Swords 폴더 안의 이름과 같아야 함
+		ImageId = "rbxassetid://0", 
+		Description = "기본적인 나무 검"
+	},
+
+	[2] = {
+		Name = "Iron Sword",
+		Price = 500,
+		ExpAmount = 20,
+		Damage = 25,
+		ModelName = "IronSword", -- 철검 모델 이름
+		ImageId = "rbxassetid://0", 
+		Description = "단단한 철검"
+	},
+
+	[3] = {
+		Name = "Gold Sword",
+		Price = 2000,
+		ExpAmount = 50,
+		Damage = 50,
+		ModelName = "GoldSword", -- 금검 모델 이름
+		ImageId = "rbxassetid://0",
+		Description = "화려한 금검"
+	},
+
+	[4] = {
+		Name = "Diamond Sword",
+		Price = 10000,
+		ExpAmount = 150,
+		Damage = 100,
+		ModelName = "DiamondSword", -- 다이아검 모델 이름
+		ImageId = "rbxassetid://0",
+		Description = "최강의 다이아 검"
+	}
+}
+
+return ShopConfig
